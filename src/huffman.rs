@@ -2,6 +2,7 @@
 //! Based off <https://github.com/webmproject/libwebp/blob/7f8472a610b61ec780ef0a8873cd954ac512a505/src/utils/huffman.c>
 
 use std::io::BufRead;
+use std::mem;
 
 use crate::decoder::DecodingError;
 
@@ -37,9 +38,22 @@ impl Default for HuffmanTree {
     }
 }
 
+/// Takes `bytes` from `memory_budget`, or fails with `MemoryLimitExceeded` when they do not fit.
+pub(crate) fn charge(memory_budget: &mut usize, bytes: usize) -> Result<(), DecodingError> {
+    *memory_budget = memory_budget
+        .checked_sub(bytes)
+        .ok_or(DecodingError::MemoryLimitExceeded)?;
+    Ok(())
+}
+
 impl HuffmanTree {
     /// Builds a tree implicitly, just from code lengths
-    pub(crate) fn build_implicit(code_lengths: Vec<u16>) -> Result<Self, DecodingError> {
+    ///
+    /// The bytes the tree allocates are taken from `memory_budget` before they are allocated.
+    pub(crate) fn build_implicit(
+        code_lengths: Vec<u16>,
+        memory_budget: &mut usize,
+    ) -> Result<Self, DecodingError> {
         // Count symbols and build histogram
         let mut num_symbols = 0;
         let mut code_length_hist = [0; MAX_ALLOWED_CODE_LENGTH + 1];
@@ -77,6 +91,11 @@ impl HuffmanTree {
         let tree_size = code_length_hist[table_bits as usize + 1..=max_code_length as usize]
             .iter()
             .sum::<u16>() as usize;
+
+        charge(
+            memory_budget,
+            table_size * mem::size_of::<u32>() + 2 * tree_size * mem::size_of::<HuffmanTreeNode>(),
+        )?;
 
         // Populate decoding table
         let mut tree = Vec::with_capacity(2 * tree_size);
@@ -153,8 +172,17 @@ impl HuffmanTree {
         Self(HuffmanTreeInner::Single(symbol))
     }
 
-    pub(crate) fn build_two_node(zero: u16, one: u16) -> Self {
-        Self(HuffmanTreeInner::Tree {
+    /// The bytes the tree allocates are taken from `memory_budget` before they are allocated.
+    pub(crate) fn build_two_node(
+        zero: u16,
+        one: u16,
+        memory_budget: &mut usize,
+    ) -> Result<Self, DecodingError> {
+        charge(
+            memory_budget,
+            2 * mem::size_of::<u32>() + 3 * mem::size_of::<HuffmanTreeNode>(),
+        )?;
+        Ok(Self(HuffmanTreeInner::Tree {
             tree: vec![
                 HuffmanTreeNode::Leaf(zero),
                 HuffmanTreeNode::Leaf(one),
@@ -162,7 +190,7 @@ impl HuffmanTree {
             ],
             table: vec![(1 << 16) | u32::from(zero), (1 << 16) | u32::from(one)],
             table_mask: 0x1,
-        })
+        }))
     }
 
     pub(crate) const fn is_single_node(&self) -> bool {
